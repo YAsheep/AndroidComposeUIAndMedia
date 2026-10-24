@@ -56,6 +56,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import androidx.core.graphics.createBitmap
 
 /** RenderEffect blur (API 31+) runs on the GPU at draw time; older devices blur on the CPU. */
 private val GpuBlurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
@@ -213,10 +214,10 @@ private class SnapshotBuffers {
     if (width == this.width && height == this.height) return
     this.width = width
     this.height = height
-    scratch = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    scratch = createBitmap(width, height)
     pixels = IntArray(width * height)
     tmp = IntArray(width * height)
-    display = Array(3) { Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888) }
+    display = Array(3) { createBitmap(width, height) }
   }
 
   fun nextDisplay(): Bitmap = display[next].also { next = (next + 1) % display.size }
@@ -287,7 +288,7 @@ private fun View.drawScaled(width: Int, height: Int): Bitmap? {
   } else {
     // API 26-27 cannot render a Picture on the GPU; skip frames that contain hardware bitmaps.
     runCatching {
-      Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+        createBitmap(width, height).also {
         val canvas = Canvas(it)
         canvas.scale(scaleX, scaleY)
         draw(canvas)
