@@ -12,6 +12,18 @@
 - 通过 MediaStore 保存到 `Movies/DevilStudio`
 - Activity 自适应横屏、竖屏及传感器旋转
 
+## 稳定预览模式
+
+默认启动入口为 `StableVideoActivity`。该 Activity 固定窗口坐标系，设备
+旋转时保持 `SurfaceView`、视频输出尺寸和播放管线不变，只通过
+`OrientationEventListener` 重新布局并旋转 Compose 工具栏。
+
+旧的 `MainActivity` 仍保留用于对比：
+
+```shell
+adb shell am start -n com.example.devilvideostudio/.MainActivity
+```
+
 ## 构建
 
 ```shell

@@ -2,24 +2,28 @@ package com.example.devilvideostudio.ui.editor
 
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.AbsoluteSizeSpan
 import android.view.SurfaceView
 import androidx.annotation.OptIn
 import androidx.media3.common.Effect
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
-import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.StaticOverlaySettings
+import androidx.media3.effect.TextOverlay
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
@@ -29,25 +33,63 @@ import androidx.media3.transformer.Transformer
 import java.io.File
 import java.io.FileInputStream
 
+/** Dynamic range of the loaded video, read from the selected video track's format. */
+enum class VideoDynamicRange(val label: String, val isHdr: Boolean) {
+  SDR("SDR", false),
+  HDR10("HDR10", true),
+  HLG("HLG", true),
+  DOLBY_VISION("杜比视界", true),
+}
+
 @OptIn(UnstableApi::class)
 class VideoEditorController(private val context: Context) {
   val player: ExoPlayer = ExoPlayer.Builder(context).build().apply {
     repeatMode = ExoPlayer.REPEAT_MODE_ALL
-    // Keep the decoded picture centered and preserve its aspect ratio across rotation.
     videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
   }
 
   private var inputUri: Uri? = null
   private var emojiEnabled = true
-  private var previewRotationDegrees = 0f
   private var transformer: Transformer? = null
 
+  var dynamicRange: VideoDynamicRange? = null
+    private set
+  var onDynamicRangeChanged: ((VideoDynamicRange) -> Unit)? = null
+  var onPlaybackError: ((String) -> Unit)? = null
+  /** Display width / height of the video, so the UI can size the SurfaceView to match. */
+  var onVideoAspectRatioChanged: ((Float) -> Unit)? = null
+
+  init {
+    player.addListener(object : Player.Listener {
+      override fun onTracksChanged(tracks: Tracks) {
+        val format = tracks.selectedVideoFormat() ?: return
+        val range = format.dynamicRange()
+        if (range == dynamicRange) return
+        dynamicRange = range
+        onDynamicRangeChanged?.invoke(range)
+      }
+
+      override fun onVideoSizeChanged(videoSize: VideoSize) {
+        if (videoSize.width == 0 || videoSize.height == 0) return
+        onVideoAspectRatioChanged?.invoke(
+          videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height,
+        )
+      }
+
+      override fun onPlayerError(error: PlaybackException) {
+        onPlaybackError?.invoke(error.message ?: "视频播放失败")
+      }
+    })
+  }
+
+  // SurfaceView hands frames straight to the display compositor, which keeps HDR output intact.
   fun attach(surfaceView: SurfaceView) = player.setVideoSurfaceView(surfaceView)
 
   fun detach(surfaceView: SurfaceView) = player.clearVideoSurfaceView(surfaceView)
 
   fun open(uri: Uri) {
     inputUri = uri
+    dynamicRange = null
     player.setMediaItem(MediaItem.fromUri(uri))
     applyPreviewEffect()
     player.prepare()
@@ -56,12 +98,6 @@ class VideoEditorController(private val context: Context) {
 
   fun setEmojiEnabled(enabled: Boolean) {
     emojiEnabled = enabled
-    applyPreviewEffect()
-  }
-
-  fun setPreviewRotation(degrees: Float) {
-    if (previewRotationDegrees == degrees) return
-    previewRotationDegrees = degrees
     applyPreviewEffect()
   }
 
@@ -81,8 +117,7 @@ class VideoEditorController(private val context: Context) {
     val source = inputUri ?: return onError("请先选择一个 MP4 文件")
     if (transformer != null) return
     val tempFile = File(context.cacheDir, "devil_export_${System.currentTimeMillis()}.mp4")
-    // Display-orientation compensation is preview-only and must not be encoded.
-    val effects = Effects(emptyList<AudioProcessor>(), exportVideoEffects())
+    val effects = Effects(emptyList<AudioProcessor>(), videoEffects())
     val editedItem = EditedMediaItem.Builder(MediaItem.fromUri(source))
       .setEffects(effects)
       .build()
@@ -106,7 +141,8 @@ class VideoEditorController(private val context: Context) {
       }
     }
     transformer = Transformer.Builder(context)
-      .setVideoMimeType(MimeTypes.VIDEO_H264)
+      // H.264 cannot carry 10-bit HDR, so keep HDR sources as HEVC.
+      .setVideoMimeType(if (dynamicRange?.isHdr == true) MimeTypes.VIDEO_H265 else MimeTypes.VIDEO_H264)
       .setAudioMimeType(MimeTypes.AUDIO_AAC)
       .addListener(listener)
       .build()
@@ -128,40 +164,24 @@ class VideoEditorController(private val context: Context) {
   }
 
   private fun applyPreviewEffect() {
-    player.setVideoEffects(previewVideoEffects())
+    player.setVideoEffects(videoEffects())
   }
 
-  private fun previewVideoEffects(): List<Effect> = buildList {
-    if (emojiEnabled) add(createEmojiOverlay())
-    if (previewRotationDegrees != 0f) {
-      add(
-        ScaleAndRotateTransformation.Builder()
-          .setRotationDegrees(previewRotationDegrees)
-          .build(),
-      )
-    }
-  }
-
-  private fun exportVideoEffects(): List<Effect> =
+  private fun videoEffects(): List<Effect> =
     if (emojiEnabled) listOf(createEmojiOverlay()) else emptyList()
 
   private fun createEmojiOverlay(): OverlayEffect {
-    val bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
-    Canvas(bitmap).drawText(
-      "😈",
-      20f,
-      210f,
-      Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = 200f
-        textAlign = Paint.Align.LEFT
-      },
-    )
+    // A TextOverlay, not a plain BitmapOverlay: on HDR input Media3 treats bitmap overlays as
+    // Ultra HDR images and rejects ones without a gainmap, while text overlays work for SDR and HDR.
+    val emoji = SpannableString("😈").apply {
+      setSpan(AbsoluteSizeSpan(200), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }
     val settings = StaticOverlaySettings.Builder()
       .setScale(.34f, .34f)
       .setBackgroundFrameAnchor(.72f, -.64f)
       .setOverlayFrameAnchor(0f, 0f)
       .build()
-    return OverlayEffect(listOf(BitmapOverlay.createStaticBitmapOverlay(bitmap, settings)))
+    return OverlayEffect(listOf(TextOverlay.createStaticTextOverlay(emoji, settings)))
   }
 
   private fun publishToMovies(file: File): Uri {
@@ -181,6 +201,18 @@ class VideoEditorController(private val context: Context) {
     values.put(MediaStore.Video.Media.IS_PENDING, 0)
     resolver.update(uri, values, null, null)
     return uri
+  }
+
+  private fun Tracks.selectedVideoFormat(): Format? {
+    val group = groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected } ?: return null
+    return (0 until group.length).firstOrNull(group::isTrackSelected)?.let(group::getTrackFormat)
+  }
+
+  private fun Format.dynamicRange(): VideoDynamicRange = when {
+    sampleMimeType == MimeTypes.VIDEO_DOLBY_VISION -> VideoDynamicRange.DOLBY_VISION
+    colorInfo?.colorTransfer == C.COLOR_TRANSFER_ST2084 -> VideoDynamicRange.HDR10
+    colorInfo?.colorTransfer == C.COLOR_TRANSFER_HLG -> VideoDynamicRange.HLG
+    else -> VideoDynamicRange.SDR
   }
 
   fun release() {
